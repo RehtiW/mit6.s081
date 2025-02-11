@@ -432,3 +432,26 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+void vmprint_helper(pagetable_t p,int level){
+  for(int i = 0; i < 512; i++){
+    pte_t pte = p[i];
+    if(pte & PTE_V){
+      uint64 child = PTE2PA(pte);
+      if(level == 1){
+        printf("..%d: pte %p pa %p\n", i, pte, child);
+      }else if(level == 2){
+        printf(".. ..%d: pte %p pa %p\n", i, pte, child);
+      }else if(level == 3){
+        printf(".. .. ..%d: pte %p pa %p\n", i, pte, child);
+      }
+
+      if((pte & (PTE_R|PTE_W|PTE_X)) == 0)  // if not mapping to pmem directly
+        vmprint_helper((pagetable_t)child, level + 1);
+    }
+  }
+}
+void vmprint(pagetable_t p){
+  int level = 1;
+  printf("page table %p\n", p);
+  vmprint_helper(p, level);
+}
