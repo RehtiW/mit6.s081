@@ -63,15 +63,14 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
-  // Fill with junk to catch dangling refs.
-  memset(pa, 1, PGSIZE);
-
-  r = (struct run*)pa;
-
   // check reference count
   decref((uint64)pa);
   int idx = ((uint64)pa - KERNBASE) / PGSIZE;
   if(pageref.ref_count[idx] == 0){
+    // Fill with junk to catch dangling refs.
+    memset(pa, 1, PGSIZE);
+    r = (struct run*)pa;
+
     // free mem
     acquire(&kmem.lock);
     r->next = kmem.freelist;

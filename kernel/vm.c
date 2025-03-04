@@ -321,12 +321,12 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
+
     if (*pte & PTE_W) { // set writable page unwritable, PTE_COW
       *pte &= ~PTE_W;    
       *pte |= PTE_COW;    
-      flags = PTE_FLAGS(*pte); // update
     }
+    flags = PTE_FLAGS(*pte); // update
     if(mappages(new, i, PGSIZE, pa, flags) != 0){ // 将该父亲物理页映射到子页表new的对应位置
       goto err;
     }
@@ -361,21 +361,26 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
+
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
+  
+    pte = walk(pagetable, va0, 0); 
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
       return -1;
+    // 判断是否有cow标记
+    // 若有则分配新页
+    if((*pte & PTE_COW)) { 
+      if(cow_alloc(pagetable, va0) != 0) 
+        return -1; 
+      pte = walk(pagetable, va0, 0);  // 获取更新后的pte
+    }
+    pa0 = PTE2PA(*pte); 
 
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
-      
-    if(is_cowpage(pagetable, va0)){
-      if(cow_alloc(pagetable, va0) < 0){
-        return -1;
-      }
-    }
     memmove((void *)(pa0 + (dstva - va0)), src, n);
 
     len -= n;
@@ -456,34 +461,32 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 // copy the data of wrong page to new page
 // map the new page to child_pagetable
 // return -1 if failed
-int cow_alloc(pagetable_t child_pagetable, uint64 fault_va){
-  void* new_page;
-  uint64 flag;
-  new_page = kalloc();
-  if(new_page < 0) // run out of mem
+int
+cow_alloc(pagetable_t pagetable, uint64 va)
+{
+  va = PGROUNDDOWN(va);
+  if(va >= MAXVA)
     return -1;
 
-  fault_va = PGROUNDDOWN(fault_va); // avoid panic: remap, make memmove copy whole page
-  pte_t *pte = walk(child_pagetable, fault_va, 0);  // get wa_pte
-  uint64 fault_pa = PTE2PA(*pte);      
+  pte_t *pte = walk(pagetable, va, 0);
+  if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_COW) == 0)
+    return -1; 
 
-  if(get_refcount(fault_pa) == 1){
-    *pte |= PTE_W;
-    *pte &= (~PTE_COW);
-    return 0;
-  }
-  memmove(new_page, (void*)fault_pa, PGSIZE); // copy the data starting at pa to new_page
+  uint64 pa = PTE2PA(*pte);
+  uint64 new_page = (uint64)kalloc();
+  if(new_page == 0)
+    return -1; 
 
-  flag = PTE_FLAGS(*pte);        
-  flag = (flag | PTE_W) & ~PTE_COW;  // set PTE_W, 0 PTE_COW,valid
-  *pte &= ~PTE_V;  // avoid panic: remap
+  // 复制原页面内容到新页面
+  memmove((void*)new_page, (void*)pa, PGSIZE);
 
-  if (mappages(child_pagetable, fault_va, PGSIZE, (uint64)new_page, flag) < 0){
-    *pte |= PTE_V;
-    kfree(new_page);
-    return -1;
-  }
-  decref(fault_pa);  
+  // 更新页表项，指向新页面，设置可写位，清除牛位
+  // 更新：不使用mappages使pte重映射到新页，避免了remap panic的麻烦
+  uint flags = (PTE_FLAGS(*pte) & ~PTE_COW) | PTE_W;
+  *pte = PA2PTE(new_page) | flags;
+
+  // 释放原页面的引用
+  kfree((void*)pa);
 
   return 0;
 }
