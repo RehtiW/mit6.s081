@@ -362,10 +362,10 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
   pte_t *pte;
-
+  if(dstva >= MAXVA)
+    return -1;
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-  
     pte = walk(pagetable, va0, 0); 
     if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
       return -1;
