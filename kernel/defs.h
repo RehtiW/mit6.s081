@@ -66,6 +66,7 @@ void            kfree(void *);
 void            kinit(void);
 void            incref(uint64 pa);
 void           decref(uint64 pa);
+int             get_refcount(uint64 pa);
 // log.c
 void            initlog(int, struct superblock*);
 void            log_write(struct buf*);
@@ -172,7 +173,7 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
-void*           cow_alloc(pagetable_t, uint64);
+int             cow_alloc(pagetable_t, uint64);
 int             is_cowpage(pagetable_t, uint64);
 // plic.c
 void            plicinit(void);

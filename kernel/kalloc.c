@@ -33,10 +33,11 @@ kinit()
 {
   initlock(&kmem.lock, "kmem");
   initlock(&pageref.lock, "pageref");
+  for(int i = 0; i < (PHYSTOP - KERNBASE) / PGSIZE; i++){ // init ref_count
+    pageref.ref_count[i] = 0;  
+  }
   freerange(end, (void*)PHYSTOP);
-  // for(int i = 0; i < (PHYSTOP - KERNBASE) / PGSIZE; i++){ // init ref_count
-  //   pageref.ref_count[i] = 0;  
-  // }
+  
 }
 
 void
@@ -45,9 +46,6 @@ freerange(void *pa_start, void *pa_end)
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
   for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
-    acquire(&pageref.lock);
-    pageref.ref_count[((uint64)p-KERNBASE) / PGSIZE] = 1;
-    release(&pageref.lock);
     kfree(p);
   }
     
@@ -71,17 +69,15 @@ kfree(void *pa)
   r = (struct run*)pa;
 
   // check reference count
-  acquire(&pageref.lock);
+  decref((uint64)pa);
   int idx = ((uint64)pa - KERNBASE) / PGSIZE;
-
-  if(-- pageref.ref_count[idx] == 0){
+  if(pageref.ref_count[idx] == 0){
     // free mem
     acquire(&kmem.lock);
     r->next = kmem.freelist;
     kmem.freelist = r;
     release(&kmem.lock);
   }
-  release(&pageref.lock);
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -123,5 +119,9 @@ void decref(uint64 pa) {
   if(pageref.ref_count[idx] > 0){
     pageref.ref_count[idx]--;
   }
-    release(&pageref.lock);
+  release(&pageref.lock);
+}
+
+int get_refcount(uint64 pa){
+  return pageref.ref_count[(pa-KERNBASE) / PGSIZE];
 }

@@ -69,7 +69,7 @@ usertrap(void)
     uint64 fault_va = r_stval();
     if(fault_va > p->sz ||
        (is_cowpage(p->pagetable, fault_va) == 0) ||
-       !cow_alloc(p->pagetable, fault_va) // no more page to alloc
+       (cow_alloc(p->pagetable, fault_va)) == -1
       )
     p->killed = 1;
   }

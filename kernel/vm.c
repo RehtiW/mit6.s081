@@ -179,10 +179,19 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
-    if(do_free){
-      uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);
+    
+    uint64 pa = PTE2PA(*pte);
+    if (do_free) {
+      if ((*pte & PTE_COW) && get_refcount(pa) > 1) {
+        decref(pa);
+      } else {
+        kfree((void *)pa); 
+      }
     }
+    // if(do_free){
+    //   uint64 pa = PTE2PA(*pte);
+    //   kfree((void*)pa);
+    // }
     *pte = 0;
   }
 }
@@ -307,16 +316,16 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   uint flags;
 
   for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walk(old, i, 0)) == 0)
+    if((pte = walk(old, i, 0)) == 0)    // parent_pagetable's pte
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if (*pte & PTE_W) { // 仅对可写的页表
-      *pte &= ~PTE_W;     // 父进程去写权限
-      *pte |= PTE_COW;    // 设置COW标记
-      flags = PTE_FLAGS(*pte); // 更新flags
+    if (*pte & PTE_W) { // set writable page unwritable, PTE_COW
+      *pte &= ~PTE_W;    
+      *pte |= PTE_COW;    
+      flags = PTE_FLAGS(*pte); // update
     }
     if(mappages(new, i, PGSIZE, pa, flags) != 0){ // 将该父亲物理页映射到子页表new的对应位置
       goto err;
@@ -354,19 +363,19 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   uint64 n, va0, pa0;
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pte_t *pte = walk(pagetable, va0, 0);
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
 
-    if(*pte & PTE_COW){
-      if((pa0 = (uint64)cow_alloc(pagetable, va0)) == 0)
-        return -1;
-    }
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
       
+    if(is_cowpage(pagetable, va0)){
+      if(cow_alloc(pagetable, va0) < 0){
+        return -1;
+      }
+    }
     memmove((void *)(pa0 + (dstva - va0)), src, n);
 
     len -= n;
@@ -446,31 +455,37 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 // allocate new page for child_pagetable
 // copy the data of wrong page to new page
 // map the new page to child_pagetable
-// return 0 if failed
-void* cow_alloc(pagetable_t child_pagetable, uint64 fault_va){
+// return -1 if failed
+int cow_alloc(pagetable_t child_pagetable, uint64 fault_va){
   void* new_page;
   uint64 flag;
   new_page = kalloc();
   if(new_page < 0) // run out of mem
-    return 0;
+    return -1;
 
+  fault_va = PGROUNDDOWN(fault_va); // avoid panic: remap, make memmove copy whole page
   pte_t *pte = walk(child_pagetable, fault_va, 0);  // get wa_pte
   uint64 fault_pa = PTE2PA(*pte);      
 
+  if(get_refcount(fault_pa) == 1){
+    *pte |= PTE_W;
+    *pte &= (~PTE_COW);
+    return 0;
+  }
   memmove(new_page, (void*)fault_pa, PGSIZE); // copy the data starting at pa to new_page
 
   flag = PTE_FLAGS(*pte);        
-  flag = (flag | PTE_W) & ~PTE_COW;  // 添加写权限,移除COW标记,valid
-  *pte &= ~PTE_V;  // 避免remap panic
+  flag = (flag | PTE_W) & ~PTE_COW;  // set PTE_W, 0 PTE_COW,valid
+  *pte &= ~PTE_V;  // avoid panic: remap
 
   if (mappages(child_pagetable, fault_va, PGSIZE, (uint64)new_page, flag) < 0){
     *pte |= PTE_V;
     kfree(new_page);
-    return 0;
+    return -1;
   }
-  decref(fault_pa);
+  decref(fault_pa);  
 
-  return new_page;
+  return 0;
 }
 
 int is_cowpage(pagetable_t child_pagetable, uint64 va){
