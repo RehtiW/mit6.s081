@@ -15,7 +15,7 @@ extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
 struct run {
-  struct run *next;
+  struct run *next;   
 };
 
 struct {
@@ -23,11 +23,20 @@ struct {
   struct run *freelist;
 } kmem;
 
+struct pageref{
+  struct spinlock lock;
+  int ref_count[(PHYSTOP - KERNBASE) / PGSIZE];
+} pageref;
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&pageref.lock, "pageref");
   freerange(end, (void*)PHYSTOP);
+  // for(int i = 0; i < (PHYSTOP - KERNBASE) / PGSIZE; i++){ // init ref_count
+  //   pageref.ref_count[i] = 0;  
+  // }
 }
 
 void
@@ -35,8 +44,13 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
+    acquire(&pageref.lock);
+    pageref.ref_count[((uint64)p-KERNBASE) / PGSIZE] = 1;
+    release(&pageref.lock);
     kfree(p);
+  }
+    
 }
 
 // Free the page of physical memory pointed at by v,
@@ -56,10 +70,18 @@ kfree(void *pa)
 
   r = (struct run*)pa;
 
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  // check reference count
+  acquire(&pageref.lock);
+  int idx = ((uint64)pa - KERNBASE) / PGSIZE;
+
+  if(-- pageref.ref_count[idx] == 0){
+    // free mem
+    acquire(&kmem.lock);
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+    release(&kmem.lock);
+  }
+  release(&pageref.lock);
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -72,11 +94,34 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
+  if(r){
+    kmem.freelist = r->next;  // set head of freelist to next
+    acquire(&pageref.lock);
+    int idx = ((uint64)r - KERNBASE) / PGSIZE; 
+    pageref.ref_count[idx] = 1;
+    release(&pageref.lock);
+  }
   release(&kmem.lock);
 
-  if(r)
+  if(r){
     memset((char*)r, 5, PGSIZE); // fill with junk
+  }
   return (void*)r;
+}
+
+
+void incref(uint64 pa) {
+  acquire(&pageref.lock);
+  int idx = (pa - KERNBASE) / PGSIZE;
+  pageref.ref_count[idx]++;
+  release(&pageref.lock);
+}
+
+void decref(uint64 pa) {
+  acquire(&pageref.lock);
+  int idx = (pa - KERNBASE) / PGSIZE;
+  if(pageref.ref_count[idx] > 0){
+    pageref.ref_count[idx]--;
+  }
+    release(&pageref.lock);
 }

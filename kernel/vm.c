@@ -5,7 +5,6 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
-
 /*
  * the kernel's page table.
  */
@@ -15,6 +14,7 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
@@ -22,8 +22,9 @@ kvmmake(void)
   pagetable_t kpgtbl;
 
   kpgtbl = (pagetable_t) kalloc();
-  memset(kpgtbl, 0, PGSIZE);
 
+  memset(kpgtbl, 0, PGSIZE);
+  
   // uart registers
   kvmmap(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
@@ -45,8 +46,8 @@ kvmmake(void)
 
   // map kernel stacks
   proc_mapstacks(kpgtbl);
-  
   return kpgtbl;
+  
 }
 
 // Initialize the one kernel_pagetable
@@ -150,7 +151,7 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
       return -1;
     if(*pte & PTE_V)
       panic("mappages: remap");
-    *pte = PA2PTE(pa) | perm | PTE_V;
+    *pte = PA2PTE(pa) | perm | PTE_V; // make pte mapping to pa, set valid bit and flags
     if(a == last)
       break;
     a += PGSIZE;
@@ -185,6 +186,7 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     *pte = 0;
   }
 }
+
 
 // create an empty user page table.
 // returns 0 if out of memory.
@@ -303,7 +305,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -312,13 +313,15 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    if (*pte & PTE_W) { // 仅对可写的页表
+      *pte &= ~PTE_W;     // 父进程去写权限
+      *pte |= PTE_COW;    // 设置COW标记
+      flags = PTE_FLAGS(*pte); // 更新flags
+    }
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){ // 将该父亲物理页映射到子页表new的对应位置
       goto err;
     }
+    incref(pa);
   }
   return 0;
 
@@ -326,6 +329,8 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }
+
+
 
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
@@ -347,15 +352,21 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
-
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    pte_t *pte = walk(pagetable, va0, 0);
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
+
+    if(*pte & PTE_COW){
+      if((pa0 = (uint64)cow_alloc(pagetable, va0)) == 0)
+        return -1;
+    }
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
+      
     memmove((void *)(pa0 + (dstva - va0)), src, n);
 
     len -= n;
@@ -431,4 +442,38 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+// allocate new page for child_pagetable
+// copy the data of wrong page to new page
+// map the new page to child_pagetable
+// return 0 if failed
+void* cow_alloc(pagetable_t child_pagetable, uint64 fault_va){
+  void* new_page;
+  uint64 flag;
+  new_page = kalloc();
+  if(new_page < 0) // run out of mem
+    return 0;
+
+  pte_t *pte = walk(child_pagetable, fault_va, 0);  // get wa_pte
+  uint64 fault_pa = PTE2PA(*pte);      
+
+  memmove(new_page, (void*)fault_pa, PGSIZE); // copy the data starting at pa to new_page
+
+  flag = PTE_FLAGS(*pte);        
+  flag = (flag | PTE_W) & ~PTE_COW;  // 添加写权限,移除COW标记,valid
+  *pte &= ~PTE_V;  // 避免remap panic
+
+  if (mappages(child_pagetable, fault_va, PGSIZE, (uint64)new_page, flag) < 0){
+    *pte |= PTE_V;
+    kfree(new_page);
+    return 0;
+  }
+  decref(fault_pa);
+
+  return new_page;
+}
+
+int is_cowpage(pagetable_t child_pagetable, uint64 va){
+  pte_t *pte = walk(child_pagetable, va, 0);
+  return (*pte & PTE_COW);
 }
