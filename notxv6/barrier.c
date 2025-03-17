@@ -37,9 +37,9 @@ barrier()
     bstate.round++;
     bstate.nthread = 0;
     pthread_cond_broadcast(&bstate.barrier_cond);
-  }else
+  }else                           // sleep to wait other threads
     pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
-    
+
   pthread_mutex_unlock(&bstate.barrier_mutex);
 }
 

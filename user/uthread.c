@@ -27,11 +27,11 @@ struct context {
   uint64 s10;
   uint64 s11;
 };
-struct thread {
+struct thread {   // keep threads info on stack
   char       stack[STACK_SIZE]; /* the thread's stack */
   int        state;             /* FREE, RUNNING, RUNNABLE */
   struct     context context;
-};
+};   
 struct thread all_thread[MAX_THREAD];
 struct thread *current_thread;
 extern void thread_switch(uint64, uint64);
