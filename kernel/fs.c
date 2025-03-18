@@ -41,8 +41,11 @@ readsb(int dev, struct superblock *sb)
 void
 fsinit(int dev) {
   readsb(dev, &sb);
-  if(sb.magic != FSMAGIC)
+  if(sb.magic != FSMAGIC){  // panic
+    printf("sb.magic %d FSMAGIC %d\n",sb.magic,FSMAGIC);
     panic("invalid file system");
+  }
+    
   initlog(dev, &sb);
 }
 

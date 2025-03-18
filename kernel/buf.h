@@ -1,4 +1,4 @@
-struct buf {
+struct buf {  // one buf corresponds to one block on disk
   int valid;   // has data been read from disk?
   int disk;    // does disk "own" buf?
   uint dev;
@@ -8,5 +8,6 @@ struct buf {
   struct buf *prev; // LRU cache list
   struct buf *next;
   uchar data[BSIZE];
+
 };
 
