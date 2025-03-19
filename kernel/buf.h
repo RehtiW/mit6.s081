@@ -9,5 +9,6 @@ struct buf {  // one buf corresponds to one block on disk
   struct buf *next;
   uchar data[BSIZE];
 
+  uint timestamp;
 };
 

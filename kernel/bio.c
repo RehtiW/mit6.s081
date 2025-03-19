@@ -26,10 +26,6 @@
 struct {
   struct spinlock lock[NBUCKET];
   struct buf buf[NBUF];
-
-  // Linked list of all buffers, through prev/next.
-  // Sorted by how recently the buffer was used.
-  // head.next is most recent, head.prev is least.
   struct buf bucket[NBUCKET];
 } bcache;
 
@@ -80,48 +76,67 @@ bget(uint dev, uint blockno)
   // still hold bucket lock
   // Not cached.
   // check if current bucket has available buf
-  for(b = bcache.bucket[bucket_no].prev; b != &bcache.bucket[bucket_no]; b = b->prev){  
-    if(b->refcnt == 0){
-      b->valid = 0;
-      b->blockno = blockno;
-      b->dev = dev;
-      b->refcnt = 1;
-      release(&bcache.lock[bucket_no]); 
-      acquiresleep(&b->lock); 
-      return b;
-    }
-  }
-  // find least recently used buf among all buckets
-  release(&bcache.lock[bucket_no]); // avoid dead lock
-  for(int i = 0; i < NBUCKET; i++){ 
-    if(i == bucket_no)
-      continue;
+  release(&bcache.lock[bucket_no]);
+  struct buf *lru_buf = 0;
+  int lru_bucket_id = -1;
+  uint min_ticks = 0xFFFFFFFF;
+
+
+retry:
+  for(int i = 0; i < NBUCKET; i++){
     acquire(&bcache.lock[i]);
-    for(b = bcache.bucket[i].prev; b != &bcache.bucket[i]; b = b->prev){  
-      if(b->refcnt == 0){
-        b->prev->next = b->next;  // unlinked from bucket[i]
-        b->next->prev = b->prev;
-        release(&bcache.lock[i]); 
-
-        acquire(&bcache.lock[bucket_no]); // insert
-        b->next = bcache.bucket[bucket_no].next;
-        b->prev = &bcache.bucket[bucket_no];
-        bcache.bucket[bucket_no].next = b;
-        b->next->prev = b;
-
-        b->valid = 0; // set valid to 0 t0 evoke virtio_disk_rw(b, 0);
-        b->blockno = blockno;
-        b->dev = dev;
-        b->refcnt = 1;
-        release(&bcache.lock[bucket_no]); 
-        acquiresleep(&b->lock); 
-        return b;
+    for(b = bcache.bucket[i].next; b != &bcache.bucket[i]; b = b->next) {
+      if (b->refcnt == 0 && b->timestamp < min_ticks) { 
+        lru_buf = b;
+        lru_bucket_id = i;
+        min_ticks = b->timestamp;
       }
-      release(&bcache.lock[i]);
     }
+    release(&bcache.lock[i]);
   }
 
-  panic("bget: no buffers");
+  if(!lru_buf)
+    panic("bget: no buffers");
+
+  acquire(&bcache.lock[lru_bucket_id]); // check if lru_buf was refered
+  int valid = 0;
+  for(b = bcache.bucket[lru_bucket_id].next; b != &bcache.bucket[lru_bucket_id]; b = b->next){
+    if(b == lru_buf && b->refcnt == 0){
+      valid = 1;
+      break;
+    }
+  }
+  if(!valid){
+    release(&bcache.lock[lru_bucket_id]);
+    lru_buf = 0;
+    lru_bucket_id = -1;
+    min_ticks = 0xFFFFFFFF;
+    goto retry;
+  }
+   
+  // unlinked frome bucket[lru_bucket_id]
+  //acquire(&bcache.lock[lru_bucket_id]); 
+  lru_buf->prev->next = lru_buf->next;
+  lru_buf->next->prev = lru_buf->prev;
+  lru_buf->blockno = blockno; // init
+  lru_buf->dev = dev;
+  lru_buf->valid = 0;
+  lru_buf->refcnt = 1;
+  release(&bcache.lock[lru_bucket_id]);
+
+  // linked
+  acquire(&bcache.lock[bucket_no]);   
+  lru_buf->next = bcache.bucket[bucket_no].next;
+  lru_buf->prev = &bcache.bucket[bucket_no];
+  bcache.bucket[bucket_no].next = lru_buf;
+  lru_buf->next->prev = lru_buf;
+  release(&bcache.lock[bucket_no]);
+
+
+  acquiresleep(&lru_buf->lock); 
+  return lru_buf;
+  
+  
 }
 
 // Return a locked buf with the contents of the indicated block.
@@ -156,20 +171,13 @@ brelse(struct buf *b)
     panic("brelse");
 
   releasesleep(&b->lock);
-  int bucket_no = hash(b->blockno);
-
+  int blockno = b->blockno;
+  int bucket_no = hash(blockno);
   acquire(&bcache.lock[bucket_no]);
   b->refcnt--;
   if (b->refcnt == 0) {
-    // no one is waiting for it.
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.bucket[bucket_no].next;
-    b->prev = &bcache.bucket[bucket_no];
-    bcache.bucket[bucket_no].next->prev = b;
-    bcache.bucket[bucket_no].next = b;
+    b->timestamp = ticks; // timestamp update
   }
-  
   release(&bcache.lock[bucket_no]);
 }
 
