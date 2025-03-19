@@ -80,9 +80,8 @@ bget(uint dev, uint blockno)
   struct buf *lru_buf = 0;
   int lru_bucket_id = -1;
   uint min_ticks = 0xFFFFFFFF;
-
-
-retry:
+  int find_better = 0;
+  int previous_id = -1;
   for(int i = 0; i < NBUCKET; i++){
     acquire(&bcache.lock[i]);
     for(b = bcache.bucket[i].next; b != &bcache.bucket[i]; b = b->next) {
@@ -90,32 +89,25 @@ retry:
         lru_buf = b;
         lru_bucket_id = i;
         min_ticks = b->timestamp;
+        find_better = 1;
       }
     }
-    release(&bcache.lock[i]);
+    if(!find_better){ // didnt find better one in this bucket
+      release(&bcache.lock[i]);
+    }else{         // find better one
+      if(previous_id != -1)
+        release(&bcache.lock[previous_id]);
+      previous_id = i;
+    } 
+    find_better = 0;
+    
   }
 
   if(!lru_buf)
     panic("bget: no buffers");
 
-  acquire(&bcache.lock[lru_bucket_id]); // check if lru_buf was refered
-  int valid = 0;
-  for(b = bcache.bucket[lru_bucket_id].next; b != &bcache.bucket[lru_bucket_id]; b = b->next){
-    if(b == lru_buf && b->refcnt == 0){
-      valid = 1;
-      break;
-    }
-  }
-  if(!valid){
-    release(&bcache.lock[lru_bucket_id]);
-    lru_buf = 0;
-    lru_bucket_id = -1;
-    min_ticks = 0xFFFFFFFF;
-    goto retry;
-  }
-   
-  // unlinked frome bucket[lru_bucket_id]
-  //acquire(&bcache.lock[lru_bucket_id]); 
+    
+  // unlinked frome bucket[lru_bucket_id] 
   lru_buf->prev->next = lru_buf->next;
   lru_buf->next->prev = lru_buf->prev;
   release(&bcache.lock[lru_bucket_id]);
@@ -126,14 +118,16 @@ retry:
   lru_buf->prev = &bcache.bucket[bucket_no];
   bcache.bucket[bucket_no].next = lru_buf;
   lru_buf->next->prev = lru_buf;
+
   for(b = bcache.bucket[bucket_no].next; b != &bcache.bucket[bucket_no]; b = b->next){
-    if(b->blockno == blockno && b->dev == dev){
+    if(b->dev == dev && b->blockno == blockno){
+      b->refcnt ++;
       release(&bcache.lock[bucket_no]);
-      acquiresleep(&b->lock); 
+      acquiresleep(&b->lock);
       return b;
     }
   }
-
+  
   lru_buf->blockno = blockno; // init
   lru_buf->dev = dev;
   lru_buf->valid = 0;
