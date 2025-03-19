@@ -118,10 +118,6 @@ retry:
   //acquire(&bcache.lock[lru_bucket_id]); 
   lru_buf->prev->next = lru_buf->next;
   lru_buf->next->prev = lru_buf->prev;
-  lru_buf->blockno = blockno; // init
-  lru_buf->dev = dev;
-  lru_buf->valid = 0;
-  lru_buf->refcnt = 1;
   release(&bcache.lock[lru_bucket_id]);
 
   // linked
@@ -130,8 +126,19 @@ retry:
   lru_buf->prev = &bcache.bucket[bucket_no];
   bcache.bucket[bucket_no].next = lru_buf;
   lru_buf->next->prev = lru_buf;
-  release(&bcache.lock[bucket_no]);
+  for(b = bcache.bucket[bucket_no].next; b != &bcache.bucket[bucket_no]; b = b->next){
+    if(b->blockno == blockno && b->dev == dev){
+      release(&bcache.lock[bucket_no]);
+      acquiresleep(&b->lock); 
+      return b;
+    }
+  }
 
+  lru_buf->blockno = blockno; // init
+  lru_buf->dev = dev;
+  lru_buf->valid = 0;
+  lru_buf->refcnt = 1;
+  release(&bcache.lock[bucket_no]);
 
   acquiresleep(&lru_buf->lock); 
   return lru_buf;
