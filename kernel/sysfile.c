@@ -119,7 +119,7 @@ sys_fstat(void)
 uint64
 sys_link(void)
 {
-  char name[DIRSIZ], new[MAXPATH], old[MAXPATH];
+  char name[DIRSIZ], new[MAXPATH], old[MAXPATH];  
   struct inode *dp, *ip;
 
   if(argstr(0, old, MAXPATH) < 0 || argstr(1, new, MAXPATH) < 0)
@@ -282,6 +282,28 @@ create(char *path, short type, short major, short minor)
 
   return ip;
 }
+// get inode that refered by ip, if rt is recurse time,
+// must holds ip's lock when called
+// locks nextinode's lock
+struct inode* symlink_open_helper(struct inode *ip, int rt){
+  if(rt == 11)
+    return 0;
+  char target[MAXPATH];
+  struct inode *nextinode;
+  if(readi(ip, 0, (uint64)target, 0, sizeof(target)) < 0){
+    iunlock(ip);
+    return 0;
+  }
+  iunlock(ip);
+  if((nextinode = namei(target)) == 0){ // hold nextinode's lock
+    return 0;
+  }
+  ilock(nextinode);
+  if(nextinode->type == T_SYMLINK){
+    return symlink_open_helper(nextinode, rt + 1);
+  }
+  return nextinode;
+}
 
 uint64
 sys_open(void)
@@ -296,9 +318,9 @@ sys_open(void)
     return -1;
 
   begin_op();
-
-  if(omode & O_CREATE){
-    ip = create(path, T_FILE, 0, 0);
+  // 获取inode
+  if(omode & O_CREATE){ // create标识符
+    ip = create(path, T_FILE, 0, 0);  // create自动上锁
     if(ip == 0){
       end_op();
       return -1;
@@ -308,7 +330,7 @@ sys_open(void)
       end_op();
       return -1;
     }
-    ilock(ip);
+    ilock(ip);    // 手动上锁
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
@@ -320,6 +342,18 @@ sys_open(void)
     iunlockput(ip);
     end_op();
     return -1;
+  }
+
+  // When a process specifies O_NOFOLLOW in the flags to open,
+  // open should open the symlink (and not follow the symbolic link).
+  if(!(omode & O_NOFOLLOW) && ip->type == T_SYMLINK){  
+    struct inode *target_inode;
+    if((target_inode = symlink_open_helper(ip,0)) == 0){
+      iput(ip);
+      end_op();
+      return -1;
+    }
+    ip = target_inode;
   }
 
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
@@ -344,6 +378,8 @@ sys_open(void)
   if((omode & O_TRUNC) && ip->type == T_FILE){
     itrunc(ip);
   }
+  
+
 
   iunlock(ip);
   end_op();
@@ -483,4 +519,33 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64
+sys_symlink(void){  // 创建一个symlink文件在path中,内容为target路径
+  char target[MAXPATH];
+  char path[MAXPATH];
+
+  struct inode *ip;
+  int n;
+  if((n = argstr(0, target, MAXPATH)) < 0)
+    return -1;
+  if(argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
+    end_op();
+    return -1;
+  }
+  // 数据写入inode
+  if(writei(ip, 0, (uint64)target, 0, n) != n){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  iunlockput(ip);
+  end_op();
+  return 0;
+
 }
