@@ -3,8 +3,12 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -352,7 +356,21 @@ exit(int status)
       p->ofile[fd] = 0;
     }
   }
-
+  for(int i = 0; i < 16; i++){
+    if(p->vmas[i].used == 1){
+      if(p->vmas[i].flags == MAP_SHARED){ // write back dirty
+        begin_op();
+        ilock(p->vmas[i].file->ip);
+        if(writei(p->vmas[i].file->ip, 1, p->vmas[i].addr_start, 0, p->vmas[i].len) != p->vmas[i].len){ // 写回文件
+          panic("exit write back error");
+        }
+        iunlock(p->vmas[i].file->ip);
+        end_op();
+      }
+      fileclose(p->vmas[i].file);
+      uvmunmap(p->pagetable, p->vmas[i].addr_start, p->vmas[i].len/PGSIZE, 1);
+    }
+  }
   begin_op();
   iput(p->cwd);
   end_op();

@@ -484,3 +484,116 @@ sys_pipe(void)
   }
   return 0;
 }
+
+//void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
+uint64 sys_mmap(void){
+  uint64 addr;
+  int fd, length, prot, flags, off;
+  struct proc *p;
+  if(argaddr(0,&addr) < 0 || argint(1,&length) < 0 || argint(2,&prot) || argint(3,&flags) || argint(4,&fd) || argint(5,&off) < 0)
+    return -1;
+
+  p = myproc();
+  if(addr == 0){
+    addr = p->sz;
+    p->sz += length;
+  }
+  struct file *f = p->ofile[fd];
+  filedup(f);
+
+  char readable = f->readable;
+  char writeble = f->writable;
+  if(prot & PROT_WRITE){
+    if(!writeble && (flags != MAP_PRIVATE))
+      return -1;
+  }
+  if(prot & PROT_READ){
+    if(!readable)
+      return -1;
+  }
+  for(int i = 0; i < 16; i++){
+    struct vm_area_t *vm = &p->vmas[i];
+    if(!vm->used){
+      vm->used = 1;
+      vm->addr_start = addr;
+      vm->len = length;
+      vm->permission = prot;
+      vm->file = f;
+      vm->flags = flags;
+      vm->off = off;
+      return addr;
+    }
+  }
+  
+  return -1;
+}
+// munmap(addr, length)
+// Implement munmap: 
+// find the VMA for the address range and unmap the specified pages (hint: use uvmunmap).
+// if munmap removes all pages of a previous mmap,
+// it should decrement the reference count of the corresponding struct file. 
+// If an unmapped page has been modified and the file is mapped MAP_SHARED, 
+// write the page back to the file. Look at filewrite for inspiration.
+
+uint64 sys_munmap(void){
+  uint64 addr;
+  int length;
+  struct proc *p = myproc();  
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0){
+    return -1;
+  }
+  if(length < 0 || addr < 0 || addr > MAXVA)
+    return -1;
+
+  struct vm_area_t *vm = 0;
+  for(int i = 0; i < 16; i++){  // 找到地址范围内对应的vma
+    struct vm_area_t *t = &p->vmas[i];
+    if(addr >= t->addr_start && addr <= t->addr_start + t->len - 1){
+      vm = t;
+      break;
+    }
+  }
+  if(!vm){
+    printf("vma not found\n");
+    return -1;
+  }
+
+  if(walkaddr(p->pagetable, addr) == 0) // if is not-mapped unmap
+    return 0;
+
+  struct file *f = vm->file;
+  uint64 addr_end = addr + length - 1;
+  uint64 va = PGROUNDDOWN(addr);
+  int flag = vm->flags;
+
+  for(; va < addr_end ; va+=PGSIZE){ 
+    //printf("current va to unmap: %x\n", va);
+    if(walkaddr(p->pagetable, va) == 0) // if is not-mapped unmap
+      continue;
+
+    if(flag == MAP_SHARED){ // write back dirty
+      int offset = va - vm->addr_start;
+      begin_op();
+      ilock(f->ip);
+      if(writei(f->ip, 1, va, offset, PGSIZE) != PGSIZE){ // 写回文件
+        printf("write back error\n");
+        return -1;
+      }
+      iunlock(f->ip);
+      end_op();
+    }
+
+    uvmunmap(p->pagetable, va, 1, 1); 
+    vm->len -= PGSIZE;  // 修改vma大小参数
+  }
+  if(addr == vm->addr_start){ // 修改vma起始位置
+    vm->addr_start += length;;
+    vm->addr_start = PGROUNDDOWN(vm->addr_start);
+  }
+  if(vm->len == 0){   // a
+    vm->used = 0;
+    fileclose(vm->file);
+  }
+
+  return 0;
+}
