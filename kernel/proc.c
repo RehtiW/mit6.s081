@@ -284,15 +284,20 @@ fork(void)
   if((np = allocproc()) == 0){
     return -1;
   }
-
+  int sz_vma = 0;
+  for(int i = 0; i < 16; i++){    // 
+    if(p->vmas[i].used){
+      sz_vma += p->vmas[i].len_origin;
+    }
+  }
+  //printf("sz_vma: %d\n",sz_vma);
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  if(uvmcopy(p->pagetable, np->pagetable, p->sz - sz_vma) < 0){  // 复制虚拟内存内容不包括vmas
     freeproc(np);
     release(&np->lock);
     return -1;
   }
   np->sz = p->sz;
-
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
@@ -307,7 +312,15 @@ fork(void)
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
-  pid = np->pid;
+  for (int i = 0; i < 16; i++) {
+    if (p->vmas[i].used) {
+      memmove(&np->vmas[i],&p->vmas[i],sizeof(struct vm_area_t)); 
+      filedup(np->vmas[i].file);  
+    }
+  }
+
+
+  pid = np->pid;    
 
   release(&np->lock);
 
@@ -356,12 +369,20 @@ exit(int status)
       p->ofile[fd] = 0;
     }
   }
+  int ptr_heap = 0; // 用于追踪原始heap指针
   for(int i = 0; i < 16; i++){
     if(p->vmas[i].used == 1){
+      ptr_heap += p->vmas[i].len_origin;  
+      p->vmas[i].used = 0;
+      if(walkaddr(p->pagetable, p->vmas[i].addr_start) == 0) // if is not-mapped unmap
+        continue;
+  
       if(p->vmas[i].flags == MAP_SHARED){ // write back dirty
         begin_op();
         ilock(p->vmas[i].file->ip);
-        if(writei(p->vmas[i].file->ip, 1, p->vmas[i].addr_start, 0, p->vmas[i].len) != p->vmas[i].len){ // 写回文件
+        int tot = 0;
+        if((tot = writei(p->vmas[i].file->ip, 1, p->vmas[i].addr_start, p->vmas[i].off_write, p->vmas[i].len)) != p->vmas[i].len){ // 写回文件
+          printf("tot: %d\n",tot);
           panic("exit write back error");
         }
         iunlock(p->vmas[i].file->ip);
@@ -369,8 +390,10 @@ exit(int status)
       }
       fileclose(p->vmas[i].file);
       uvmunmap(p->pagetable, p->vmas[i].addr_start, p->vmas[i].len/PGSIZE, 1);
+      p->vmas[i].len = 0;
     }
   }
+  p->sz -= ptr_heap;  //找到heap顶
   begin_op();
   iput(p->cwd);
   end_op();

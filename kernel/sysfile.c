@@ -494,12 +494,7 @@ uint64 sys_mmap(void){
     return -1;
 
   p = myproc();
-  if(addr == 0){
-    addr = p->sz;
-    p->sz += length;
-  }
   struct file *f = p->ofile[fd];
-  filedup(f);
 
   char readable = f->readable;
   char writeble = f->writable;
@@ -511,16 +506,27 @@ uint64 sys_mmap(void){
     if(!readable)
       return -1;
   }
+
+  if(addr == 0){
+    addr = p->sz;
+  }
+  p->sz += length;
+
+  filedup(f); // increment the refcnt_file
+
   for(int i = 0; i < 16; i++){
     struct vm_area_t *vm = &p->vmas[i];
     if(!vm->used){
       vm->used = 1;
       vm->addr_start = addr;
+      vm->addr_start_origin = addr;
       vm->len = length;
+      vm->len_origin =length;
       vm->permission = prot;
       vm->file = f;
       vm->flags = flags;
       vm->off = off;
+      vm->off_write = 0;
       return addr;
     }
   }
@@ -542,7 +548,7 @@ uint64 sys_munmap(void){
   if(argaddr(0, &addr) < 0 || argint(1, &length) < 0){
     return -1;
   }
-  if(length < 0 || addr < 0 || addr > MAXVA)
+  if(length < 0 || addr < 0 || addr >= MAXVA)
     return -1;
 
   struct vm_area_t *vm = 0;
@@ -557,9 +563,12 @@ uint64 sys_munmap(void){
     printf("vma not found\n");
     return -1;
   }
-
-  if(walkaddr(p->pagetable, addr) == 0) // if is not-mapped unmap
-    return 0;
+  // if is not-mapped unmap
+  if(walkaddr(p->pagetable, addr) == 0) {
+    vm->len -= length;
+    goto ret;
+  }
+    
 
   struct file *f = vm->file;
   uint64 addr_end = addr + length - 1;
@@ -567,10 +576,9 @@ uint64 sys_munmap(void){
   int flag = vm->flags;
 
   for(; va < addr_end ; va+=PGSIZE){ 
-    //printf("current va to unmap: %x\n", va);
     if(walkaddr(p->pagetable, va) == 0) // if is not-mapped unmap
       continue;
-
+      
     if(flag == MAP_SHARED){ // write back dirty
       int offset = va - vm->addr_start;
       begin_op();
@@ -582,15 +590,19 @@ uint64 sys_munmap(void){
       iunlock(f->ip);
       end_op();
     }
-
     uvmunmap(p->pagetable, va, 1, 1); 
     vm->len -= PGSIZE;  // 修改vma大小参数
   }
-  if(addr == vm->addr_start){ // 修改vma起始位置
-    vm->addr_start += length;;
+  if(addr == vm->addr_start){ // 若unmap起始地址为vma起始地址,则修改vma起始位置
+    vm->addr_start += length;
+    vm->off_write += length;  // 因为取消映射的是头部，且写回文件，则off_write 相应地改变
     vm->addr_start = PGROUNDDOWN(vm->addr_start);
+  }else{
+    // OK
   }
-  if(vm->len == 0){   // a
+  ret:
+  if(vm->len == 0){ 
+    p->sz -= vm->len_origin;
     vm->used = 0;
     fileclose(vm->file);
   }

@@ -69,14 +69,18 @@ usertrap(void)
 
     syscall();
   }else if(r_scause() == 13 || r_scause() == 15){ // 读写错误
+    
+  
     uint64 va = r_stval();
     va = PGROUNDDOWN(va);
     uint64* addr_pmem = 0;
-
+  
     int lazy = 0;       // 判断是否需要lazy allocation
     struct vm_area_t *vm;
     for(int i = 0; i < 16; i++){  // 查询vm_area表
-      if(va >= p->vmas[i].addr_start && va <= p->vmas[i].addr_start + p->vmas[i].len - 1){
+      if(!p->vmas[i].used)
+        continue;
+      if(va >= p->vmas[i].addr_start && va <= p->vmas[i].addr_start + p->vmas[i].len_origin - 1){
         lazy = 1;
         vm = &p->vmas[i];
         break;
@@ -85,21 +89,21 @@ usertrap(void)
     if(!lazy)
       goto err;
 
-    uint off = vm->off;
-
+    uint off = va - vm->addr_start_origin + vm->off; // 计算文件起始偏移量
+    
     if((addr_pmem = kalloc()) == 0)
       goto err;
 
     memset(addr_pmem, 0, PGSIZE); // 新分配内存清空
-    //printf("current va to map: %x\n", va);
+    
     if(mappages(p->pagetable, va, PGSIZE, (uint64)(addr_pmem), (vm->permission << 1) | PTE_U) != 0){
       kfree(addr_pmem);
       goto err;
     }
+
     ilock(vm->file->ip);
     readi(vm->file->ip, 1, va, off, PGSIZE);
     iunlock(vm->file->ip);
-    vm->off += PGSIZE;
     
 
   }else if((which_dev = devintr()) != 0){

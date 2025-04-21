@@ -84,11 +84,16 @@ enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 struct vm_area_t{
   uint64 addr_start;
+  uint64 addr_start_origin;
   uint64 len;
+  uint64 len_origin;
   uint64 permission;
   struct file *file;
   uint flags;
   uint off;
+  // index that helps to write data back to file, 
+  // off_write is changed only when addr_start is changed
+  uint off_write; 
   int used;
   
 };
