@@ -102,7 +102,21 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
-  
+  uint32 tdt_idx = regs[E1000_TDT];
+  if(!(tx_ring[tdt_idx].status & E1000_TXD_STAT_DD)){
+    return -1;
+  }
+  if (tx_mbufs[tdt_idx] != 0) {
+    mbuffree(tx_mbufs[tdt_idx]);
+    tx_mbufs[tdt_idx] = 0;
+  }
+  tx_ring[tdt_idx].addr = (uint64)m->head;
+  tx_ring[tdt_idx].length = m->len;
+  tx_ring[tdt_idx].cmd = E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP; 
+  tx_ring[tdt_idx].status = 0; 
+  tx_mbufs[tdt_idx] = m;
+
+  regs[E1000_TDT] = (tdt_idx + 1) % TX_RING_SIZE;
   return 0;
 }
 
@@ -115,6 +129,38 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  uint32 rdt_idx = regs[E1000_RDT];
+  uint processed = 0;
+
+  while (1) {
+      uint32 index = (rdt_idx + 1) % RX_RING_SIZE;
+
+      struct rx_desc *desc = &rx_ring[index];
+
+      if (!(desc->status & E1000_RXD_STAT_DD)) {
+          break;
+      }
+      struct mbuf *m = rx_mbufs[index];
+      m->len = desc->length;
+      net_rx(m);
+
+      // 分配新mbuf并绑定到描述符
+      struct mbuf *new_mbuf = mbufalloc(0);
+      if (!new_mbuf) {
+          panic("e1000_recv: mbuf allocation failed");
+      }
+
+      rx_mbufs[index] = new_mbuf;
+      desc->addr = (uint64)new_mbuf->head; 
+      desc->status = 0; 
+
+      rdt_idx = index;
+      processed++;
+  }
+
+  if (processed > 0) {
+      regs[E1000_RDT] = rdt_idx;
+  }
 }
 
 void
